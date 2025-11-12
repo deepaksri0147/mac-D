@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""
+Enhanced Neo4j Tool Manager with Field Descriptions Support
+"""
+
+import os
+import logging
+from typing import Dict, Any, List, Optional
+from neo4j import GraphDatabase
+
+logger = logging.getLogger(__name__)
+
+
+class EnhancedNeo4jToolManager:
+    """Manages API tools in Neo4j with embeddings and field descriptions"""
+    
+    def __init__(self, uri: str = None, user: str = None, password: str = None):
+        self.uri = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
+        self.user = user or os.getenv("NEO4J_USER", "neo4j")
+        self.password = password or os.getenv("NEO4J_PASSWORD", "password123")
+        self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+        
+    def close(self):
+        """Close Neo4j connection"""
+        self.driver.close()
+    
+    def create_indexes(self):
+        """Create necessary indexes and constraints"""
+        with self.driver.session() as session:
+            # Vector index for embeddings
+            try:
+                session.run("""
+                    CREATE VECTOR INDEX tool_embeddings IF NOT EXISTS
+                    FOR (t:Tool)
+                    ON t.embedding
+                    OPTIONS {indexConfig: {
+                        `vector.dimensions`: 768,
+                        `vector.similarity_function`: 'cosine'
+                    }}
+                """)
+                logger.info("✓ Vector index created/verified")
+            except Exception as e:
+                logger.warning(f"Vector index warning: {e}")
+            
+            # Unique constraint on tool_id
+            try:
+                session.run("""
+                    CREATE CONSTRAINT tool_id_unique IF NOT EXISTS
+                    FOR (t:Tool)
+                    REQUIRE t.tool_id IS UNIQUE
+                """)
+                logger.info("✓ Unique constraint on tool_id created")
+            except Exception as e:
+                logger.warning(f"Constraint warning: {e}")
+    
+    def insert_tool(self, tool: Dict[str, Any], embedding: List[float]) -> bool:
+        """
+        Insert or update a tool with its embedding
+        
+        Args:
+            tool: Tool dictionary with all fields including field_descriptions
+            embedding: Vector embedding for semantic search
+            
+        Returns:
+            True if successful
+        """
+        try:
+            with self.driver.session() as session:
+                # Merge tool node
+                result = session.run("""
+                    MERGE (t:Tool {tool_id: $tool_id})
+                    SET t.name = $name,
+                        t.description = $description,
+                        t.keywords = $keywords,
+                        t.url = $url,
+                        t.method = $method,
+                        t.headers = $headers,
+                        t.requestBody = $requestBody,
+                        t.field_descriptions = $field_descriptions,
+                        t.required_fields = $required_fields,
+                        t.authentication_required = $authentication_required,
+                        t.returns_token = $returns_token,
+                        t.token_field = $token_field,
+                        t.example_prompts = $example_prompts,
+                        t.embedding = $embedding,
+                        t.updated_at = datetime()
+                    RETURN t.tool_id as tool_id
+                """, 
+                    tool_id=tool["tool_id"],
+                    name=tool.get("name", ""),
+                    description=tool.get("description", ""),
+                    keywords=tool.get("keywords", []),
+                    url=tool["schema"].get("url", ""),
+                    method=tool["schema"].get("method", "POST"),
+                    headers=str(tool["schema"].get("headers", {})),
+                    requestBody=str(tool["schema"].get("requestBody", {})),
+                    field_descriptions=str(tool["schema"].get("field_descriptions", {})),
+                    required_fields=tool["schema"].get("required_fields", []),
+                    authentication_required=tool["schema"].get("authentication_required", False),
+                    returns_token=tool["schema"].get("returns_token", False),
+                    token_field=tool["schema"].get("token_field", "token"),
+                    example_prompts=tool.get("example_prompts", []),
+                    embedding=embedding
+                )
+                
+                tool_id = result.single()["tool_id"]
+                
+                # Create dependency relationships
+                if tool.get("dependencies"):
+                    for dep_id in tool["dependencies"]:
+                        session.run("""
+                            MATCH (t:Tool {tool_id: $tool_id})
+                            MATCH (d:Tool {tool_id: $dep_id})
+                            MERGE (t)-[:DEPENDS_ON]->(d)
+                        """, tool_id=tool["tool_id"], dep_id=dep_id)
+                
+                logger.info(f"✓ Tool '{tool_id}' inserted/updated successfully")
+                return True
+                
+        except Exception as e:
+            logger.error(f"✗ Error inserting tool: {e}")
+            return False
+    
+    def search_tools_by_embedding(
+        self, 
+        query_embedding: List[float], 
+        limit: int = 3,
+        similarity_threshold: float = 0.7
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for similar tools using vector similarity
+        
+        Args:
+            query_embedding: Query vector
+            limit: Maximum number of results
+            similarity_threshold: Minimum similarity score (0-1)
+            
+        Returns:
+            List of matching tools with similarity scores
+        """
+        try:
+            with self.driver.session() as session:
+                result = session.run("""
+                    CALL db.index.vector.queryNodes('tool_embeddings', $limit, $query_embedding)
+                    YIELD node, score
+                    WHERE score >= $similarity_threshold
+                    RETURN node.tool_id as tool_id,
+                           node.name as name,
+                           node.description as description,
+                           node.url as url,
+                           node.method as method,
+                           node.headers as headers,
+                           node.requestBody as requestBody,
+                           node.field_descriptions as field_descriptions,
+                           node.required_fields as required_fields,
+                           node.authentication_required as authentication_required,
+                           node.returns_token as returns_token,
+                           node.token_field as token_field,
+                           score
+                    ORDER BY score DESC
+                """, 
+                    query_embedding=query_embedding, 
+                    limit=limit,
+                    similarity_threshold=similarity_threshold
+                )
+                
+                tools = []
+                for record in result:
+                    tools.append({
+                        "tool_id": record["tool_id"],
+                        "name": record["name"],
+                        "description": record["description"],
+                        "url": record["url"],
+                        "method": record["method"],
+                        "headers": eval(record["headers"]),
+                        "requestBody": eval(record["requestBody"]),
+                        "field_descriptions": eval(record["field_descriptions"]),
+                        "required_fields": record["required_fields"],
+                        "authentication_required": record["authentication_required"],
+                        "returns_token": record["returns_token"],
+                        "token_field": record["token_field"],
+                        "similarity_score": record["score"]
+                    })
+                
+                return tools
+                
+        except Exception as e:
+            logger.error(f"✗ Error searching tools: {e}")
+            return []
+    
+    def get_tool_dependencies(self, tool_id: str) -> List[str]:
+        """Get list of tool IDs that this tool depends on"""
+        try:
+            with self.driver.session() as session:
+                result = session.run("""
+                    MATCH (t:Tool {tool_id: $tool_id})-[:DEPENDS_ON]->(d:Tool)
+                    RETURN d.tool_id as dep_id
+                    ORDER BY d.tool_id
+                """, tool_id=tool_id)
+                
+                return [record["dep_id"] for record in result]
+                
+        except Exception as e:
+            logger.error(f"✗ Error getting dependencies: {e}")
+            return []
+
+
+def create_neo4j_manager() -> EnhancedNeo4jToolManager:
+    """Factory function to create Neo4j manager"""
+    return EnhancedNeo4jToolManager()
