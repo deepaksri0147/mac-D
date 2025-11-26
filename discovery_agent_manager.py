@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 class DiscoveryAgentManager:
     """Manages agents in the discovery agent database"""
     
-    def __init__(self, uri: str = None, user: str = None, password: str = None, database: str = "discoveryagent"):
+    def __init__(self, uri: str = None, user: str = None, password: str = None, database: str = "neo4j"):
         self.uri = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self.user = user or os.getenv("NEO4J_USER", "neo4j")
-        self.password = password or os.getenv("NEO4J_PASSWORD", "password")
+        self.password = password or os.getenv("NEO4J_PASSWORD", "password123")
         self.database = database
         self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
         
@@ -54,7 +54,25 @@ class DiscoveryAgentManager:
                 logger.info("✓ Unique constraint on agent_id created")
             except Exception as e:
                 logger.warning(f"Constraint warning: {e}")
+        
+        self._migrate_agent_properties() # Call the migration method here
     
+    def _migrate_agent_properties(self):
+        """
+        Ensures all existing Agent nodes have a 'tools' property,
+        setting it to an empty list if missing.
+        """
+        with self.driver.session(database=self.database) as session:
+            try:
+                session.run("""
+                    MATCH (a:Agent)
+                    WHERE NOT EXISTS(a.tools)
+                    SET a.tools = []
+                """)
+                logger.info("✓ Migrated existing Agent nodes to include 'tools' property")
+            except Exception as e:
+                logger.warning(f"Migration warning for 'tools' property: {e}")
+
     def insert_agent(self, agent: Dict[str, Any], embedding: List[float]) -> bool:
         """
         Insert or update an agent with its embedding
@@ -80,7 +98,7 @@ class DiscoveryAgentManager:
                         a.embedding = $embedding,
                         a.updated_at = datetime()
                     RETURN a.agent_id as agent_id
-                """, 
+                """,
                     agent_id=agent["agent_id"],
                     name=agent.get("name", ""),
                     description=agent.get("description", ""),
