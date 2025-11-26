@@ -10,6 +10,7 @@ import json
 import ast
 from typing import Dict, Any, Optional, List
 from neo4j_enhanced_manager import create_neo4j_manager
+from discovery_agent_manager import create_discovery_agent_manager
 from embedding_service_ollama import create_ollama_embedding_service
 from llm_prompt_parser import create_prompt_parser
 from api_executor import create_api_executor
@@ -25,21 +26,25 @@ logger = logging.getLogger(__name__)
 class APIOrchestrator:
     """
     Main orchestrator that handles the complete pipeline:
-    1. User prompt → Search Neo4j for relevant tool
-    2. Parse prompt for parameter modifications
-    3. Handle dependencies (e.g., generate token first)
-    4. Execute API with modified parameters
-    5. Return response
+    1. User prompt → Search discovery agent DB for relevant agent
+    2. Connect to agent's specific DB → Search for relevant tool
+    3. Parse prompt for parameter modifications
+    4. Handle dependencies (e.g., generate token first)
+    5. Execute API with modified parameters
+    6. Return response
     """
     
     def __init__(self):
-        self.neo4j_manager = create_neo4j_manager()
+        self.discovery_agent_manager = create_discovery_agent_manager()
         self.embedding_service = create_ollama_embedding_service()
         self.prompt_parser = create_prompt_parser()
         self.api_executor = create_api_executor()
         
-        # Ensure Neo4j indexes exist
-        self.neo4j_manager.create_indexes()
+        # Agent-specific Neo4j managers (will be created dynamically)
+        self.agent_neo4j_managers = {}  # Cache managers per agent database
+        
+        # Ensure discovery agent DB indexes exist
+        self.discovery_agent_manager.create_indexes()
         
         logger.info("✅ Orchestrator initialized successfully")
     
@@ -56,19 +61,38 @@ class APIOrchestrator:
         logger.info(f"📝 Processing user request: '{user_prompt}'")
         
         try:
-            # Step 1: Find relevant tool using semantic search
-            logger.info("🔍 Step 1: Searching for relevant API tool...")
-            tool = self._find_relevant_tool(user_prompt)
+            # Step 0: Find relevant agent using discovery agent DB
+            logger.info("🤖 Step 0: Searching for relevant agent...")
+            agent = self._find_relevant_agent(user_prompt)
+            
+            if not agent:
+                return {
+                    "success": False,
+                    "error": "No matching agent found for your request",
+                    "suggestion": "Try rephrasing your request or check available agents"
+                }
+            
+            logger.info(f"✓ Found agent: {agent['name']} (ID: {agent['agent_id']})")
+            logger.info(f"  Similarity score: {agent['similarity_score']:.3f}")
+            logger.info(f"  Agent database: {agent['database_name']}")
+            
+            # Step 1: Find relevant tool in agent's database
+            logger.info(f"🔍 Step 1: Searching for relevant API tool in {agent['name']} database...")
+            tool = self._find_relevant_tool(user_prompt, agent['database_name'])
             
             if not tool:
                 return {
                     "success": False,
-                    "error": "No matching API tool found for your request",
-                    "suggestion": "Try rephrasing your request or check available tools"
+                    "error": f"No matching API tool found in {agent['name']} for your request",
+                    "suggestion": "Try rephrasing your request or check available tools",
+                    "agent": agent['name']
                 }
             
             logger.info(f"✓ Found tool: {tool['name']} (ID: {tool['tool_id']})")
             logger.info(f"  Similarity score: {tool['similarity_score']:.3f}")
+            
+            # Store agent database in tool for later use
+            tool['agent_database'] = agent['database_name']
             
             # Step 2: Parse prompt for parameter modifications
             logger.info("🧠 Step 2: Parsing prompt for parameter modifications...")
@@ -188,8 +212,9 @@ class APIOrchestrator:
                 parameter_modifications = {**parameter_modifications, **dependency_values}
             
             # Generate unique name if not provided (to avoid conflicts)
-            # Skip for data ingestion - it doesn't need a name field
-            if tool["tool_id"] != "ingest_data_api" and "name" not in parameter_modifications:
+            # Only add name if the tool's requestBody actually has a name field
+            request_body = tool.get("requestBody", {})
+            if "name" in request_body and "name" not in parameter_modifications:
                 unique_name = self._generate_unique_name_for_tool(tool["tool_id"])
                 if unique_name:
                     parameter_modifications["name"] = unique_name
@@ -208,7 +233,7 @@ class APIOrchestrator:
                 self.api_executor.cache_token(tool["tool_id"], result["token"])
             
             # Format final response
-            return self._format_response(tool, result, parameter_modifications)
+            return self._format_response(tool, result, parameter_modifications, agent)
             
         except Exception as e:
             logger.error(f"❌ Error processing request: {e}")
@@ -217,21 +242,65 @@ class APIOrchestrator:
                 "error": str(e)
             }
     
-    def _find_relevant_tool(self, user_prompt: str) -> Optional[Dict[str, Any]]:
+    def _find_relevant_agent(self, user_prompt: str) -> Optional[Dict[str, Any]]:
         """
-        Find the most relevant tool for the user's request
+        Find the most relevant agent for the user's request using discovery agent DB
         
         Args:
             user_prompt: User's request
             
         Returns:
-            Tool information or None
+            Agent information or None
         """
         # Create embedding for user prompt
         query_embedding = self.embedding_service.create_embedding(user_prompt)
         
-        # Search Neo4j
-        tools = self.neo4j_manager.search_tools_by_embedding(
+        # Search discovery agent DB
+        agents = self.discovery_agent_manager.search_agents_by_embedding(
+            query_embedding=query_embedding,
+            limit=1,
+            similarity_threshold=0.6  # Adjust based on your needs
+        )
+        
+        return agents[0] if agents else None
+    
+    def _get_agent_neo4j_manager(self, database_name: str):
+        """
+        Get or create Neo4j manager for a specific agent database
+        
+        Args:
+            database_name: Name of the agent's database (e.g., "piagent", "runrun")
+            
+        Returns:
+            Neo4j manager for the agent's database
+        """
+        if database_name not in self.agent_neo4j_managers:
+            manager = create_neo4j_manager(database=database_name)
+            manager.create_indexes()  # Ensure indexes exist
+            self.agent_neo4j_managers[database_name] = manager
+            logger.info(f"✓ Created Neo4j manager for database: {database_name}")
+        
+        return self.agent_neo4j_managers[database_name]
+    
+    def _find_relevant_tool(self, user_prompt: str, agent_database: str) -> Optional[Dict[str, Any]]:
+        """
+        Find the most relevant tool for the user's request in agent's database
+        
+        Args:
+            user_prompt: User's request
+            agent_database: Name of the agent's database (e.g., "piagent", "runrun")
+            
+        Returns:
+            Tool information or None
+        """
+        # Get agent-specific Neo4j manager
+        agent_neo4j_manager = self._get_agent_neo4j_manager(agent_database)
+        
+        # Create embedding for user prompt
+        query_embedding = self.embedding_service.create_embedding(user_prompt)
+        
+        # Search agent's Neo4j database
+        tools = agent_neo4j_manager.search_tools_by_embedding(
             query_embedding=query_embedding,
             limit=1,
             similarity_threshold=0.6  # Adjust based on your needs
@@ -570,8 +639,15 @@ class APIOrchestrator:
             logger.info("  ✓ No authentication required")
             return result
         
-        # Get dependencies
-        dependencies = self.neo4j_manager.get_tool_dependencies(tool["tool_id"])
+        # Get agent database from tool (should be set earlier)
+        agent_database = tool.get("agent_database")
+        if not agent_database:
+            logger.error("⚠ Agent database not found in tool - cannot get dependencies")
+            return result
+        
+        # Get dependencies from agent's database
+        agent_neo4j_manager = self._get_agent_neo4j_manager(agent_database)
+        dependencies = agent_neo4j_manager.get_tool_dependencies(tool["tool_id"])
         
         if not dependencies:
             logger.warning("  ⚠ Tool requires auth but has no dependencies defined")
@@ -583,9 +659,12 @@ class APIOrchestrator:
         current_token = None
         token_dep_id = None
         
+        # Get agent database from tool (stored earlier)
+        agent_database = tool.get("agent_database")
+        
         # Find token generation dependency
         for dep_id in dependencies:
-            dep_tool = self._get_tool_by_id(dep_id)
+            dep_tool = self._get_tool_by_id(dep_id, agent_database)
             if dep_tool and dep_tool.get("returns_token", False):
                 token_dep_id = dep_id
                 cached_token = self.api_executor.get_cached_token(dep_id)
@@ -616,7 +695,7 @@ class APIOrchestrator:
         # Process dataverse creation first if needed (before schema creation)
         if needs_dataverse and "create_dataverse_api" not in dependencies:
             # Check if dataverse tool exists and create it
-            dataverse_tool = self._get_tool_by_id("create_dataverse_api")
+            dataverse_tool = self._get_tool_by_id("create_dataverse_api", agent_database)
             if dataverse_tool and current_token:
                 logger.info(f"  🔧 Creating dataverse (required for schema creation)...")
                 dep_modifications = self._generate_unique_dataverse_name()
@@ -631,7 +710,7 @@ class APIOrchestrator:
             if dep_id == token_dep_id:
                 continue  # Skip token generation, already handled
             
-            dep_tool = self._get_tool_by_id(dep_id)
+            dep_tool = self._get_tool_by_id(dep_id, agent_database)
             if not dep_tool:
                 logger.error(f"  ✗ Dependency tool not found: {dep_id}")
                 continue
@@ -709,27 +788,46 @@ class APIOrchestrator:
         result["token"] = current_token
         return result
     
-    def _get_tool_by_id(self, tool_id: str) -> Optional[Dict[str, Any]]:
+    def _get_tool_by_id(self, tool_id: str, agent_database: str = None) -> Optional[Dict[str, Any]]:
         """
-        Get tool information by tool_id
+        Get tool information by tool_id from agent's database
         
         Args:
             tool_id: Tool ID to search for
+            agent_database: Name of the agent's database (optional, will search all if not provided)
             
         Returns:
             Tool information or None
         """
-        # Search for tool using embedding (semantic search)
-        query_embedding = self.embedding_service.create_embedding(tool_id)
-        tools = self.neo4j_manager.search_tools_by_embedding(
-            query_embedding=query_embedding,
-            limit=10  # Get more results to find exact match
-        )
-        
-        # Find exact match by tool_id
-        for tool in tools:
-            if tool.get("tool_id") == tool_id:
-                return tool
+        # If agent_database is provided, search only that database
+        if agent_database:
+            agent_neo4j_manager = self._get_agent_neo4j_manager(agent_database)
+            query_embedding = self.embedding_service.create_embedding(tool_id)
+            tools = agent_neo4j_manager.search_tools_by_embedding(
+                query_embedding=query_embedding,
+                limit=10  # Get more results to find exact match
+            )
+            
+            # Find exact match by tool_id
+            for tool in tools:
+                if tool.get("tool_id") == tool_id:
+                    tool['agent_database'] = agent_database
+                    return tool
+        else:
+            # Search all agent databases (fallback)
+            # This is less efficient but works if agent_database is unknown
+            for db_name in self.agent_neo4j_managers.keys():
+                agent_neo4j_manager = self.agent_neo4j_managers[db_name]
+                query_embedding = self.embedding_service.create_embedding(tool_id)
+                tools = agent_neo4j_manager.search_tools_by_embedding(
+                    query_embedding=query_embedding,
+                    limit=10
+                )
+                
+                for tool in tools:
+                    if tool.get("tool_id") == tool_id:
+                        tool['agent_database'] = db_name
+                        return tool
         
         logger.error(f"  ✗ Tool not found: {tool_id}")
         return None
@@ -830,12 +928,18 @@ class APIOrchestrator:
         self, 
         tool: Dict[str, Any], 
         result: Dict[str, Any],
-        modifications: Dict[str, Any]
+        modifications: Dict[str, Any],
+        agent: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """Format the final response for the user"""
         
-        return {
+        response = {
             "success": result["success"],
+            "agent": {
+                "id": agent.get("agent_id") if agent else None,
+                "name": agent.get("name") if agent else None,
+                "database": agent.get("database_name") if agent else None
+            } if agent else None,
             "tool_used": {
                 "id": tool["tool_id"],
                 "name": tool["name"],
@@ -847,10 +951,16 @@ class APIOrchestrator:
             "token": result.get("token"),  # Include if token was generated
             "error": result.get("error")
         }
+        
+        return response
     
     def close(self):
         """Clean up resources"""
-        self.neo4j_manager.close()
+        self.discovery_agent_manager.close()
+        # Close all agent-specific Neo4j managers
+        for db_name, manager in self.agent_neo4j_managers.items():
+            manager.close()
+            logger.info(f"✓ Closed Neo4j manager for database: {db_name}")
         logger.info("✓ Orchestrator closed")
 
 
@@ -898,6 +1008,10 @@ def main():
             # Display result
             if result["success"]:
                 print("\n✅ SUCCESS")
+                
+                if result.get("agent"):
+                    print(f"\n🤖 Agent: {result['agent']['name']} (Database: {result['agent']['database']})")
+                
                 print(f"\n🔧 Tool Used: {result['tool_used']['name']}")
                 print(f"🌐 URL: {result['tool_used']['url']}")
                 
@@ -914,6 +1028,8 @@ def main():
                     print(f"\n🔑 Token Generated: {result['token'][:50]}...")
             else:
                 print("\n❌ FAILED")
+                if result.get("agent"):
+                    print(f"Agent: {result['agent']['name']}")
                 print(f"Error: {result.get('error')}")
                 if result.get('suggestion'):
                     print(f"Suggestion: {result['suggestion']}")

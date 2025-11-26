@@ -43,6 +43,17 @@ class APIExecutor:
             method = tool_info.get("method", "POST")
             headers = deepcopy(tool_info.get("headers", {}))
             request_body = deepcopy(tool_info.get("requestBody", {}))
+            query_parameters = deepcopy(tool_info.get("queryParameters", {}))
+            
+            # If queryParameters is empty (not loaded from Neo4j), try to infer defaults from tool_id
+            # This is a fallback for tools that were inserted before queryParameters support was added
+            if not query_parameters and tool_info.get("tool_id") == "vulnerability_check_api":
+                query_parameters = {"env": "TEST", "sync": False}
+                logger.info("  ⚠ Using default queryParameters for vulnerability_check_api (not in Neo4j)")
+            
+            # Determine content type from headers
+            content_type = headers.get("Content-Type", "").lower()
+            is_multipart = "multipart/form-data" in content_type
             
             # Apply parameter modifications
             if parameter_modifications:
@@ -62,9 +73,52 @@ class APIExecutor:
                         url = url.replace(f"{{{param_name}}}", str(param_value))
                         logger.info(f"✓ Replaced URL parameter {{{param_name}}} with: {param_value}")
                 
+                # Handle query parameters separately
+                # Check against tool_info's queryParameters to determine which fields should be query params
+                tool_query_params = tool_info.get("queryParameters", {})
+                original_request_body_keys = set(request_body.keys())
+                
+                # Common query parameter names (fallback if queryParameters not in Neo4j)
+                common_query_params = {'env', 'sync', 'limit', 'offset', 'page', 'size', 'sort', 'filter'}
+                
+                query_param_updates = {}
+                for key in list(parsed_modifications.keys()):
+                    # If key exists in tool's queryParameters definition, it should be a query param
+                    # OR if key is not in requestBody and is a common query param name, treat it as query param
+                    is_query_param = (
+                        key in tool_query_params or 
+                        key in query_parameters or
+                        (key not in original_request_body_keys and key in common_query_params)
+                    )
+                    
+                    if is_query_param:
+                        value = parsed_modifications.pop(key)
+                        # Convert string booleans to actual booleans for query params
+                        if isinstance(value, str):
+                            if value.lower() == 'true':
+                                value = True
+                            elif value.lower() == 'false':
+                                value = False
+                        query_param_updates[key] = value
+                
+                if query_param_updates:
+                    query_parameters.update(query_param_updates)
+                    logger.info(f"✓ Updated query parameters: {query_param_updates}")
+                
+                # Filter out fields that aren't in the original requestBody (to avoid adding unwanted fields)
+                # This prevents LLM from adding fields like 'name' that don't belong in the request body
+                # (original_request_body_keys already defined above)
+                filtered_modifications = {
+                    k: v for k, v in parsed_modifications.items() 
+                    if k in original_request_body_keys or k.startswith('_')  # Allow internal fields
+                }
+                removed_fields = set(parsed_modifications.keys()) - set(filtered_modifications.keys())
+                if removed_fields:
+                    logger.info(f"  ⚠ Filtered out fields not in requestBody: {removed_fields}")
+                
                 # Deep merge for nested structures (like attributes array)
-                request_body = self._deep_merge(request_body, parsed_modifications)
-                logger.info(f"✓ Applied modifications: {parsed_modifications}")
+                request_body = self._deep_merge(request_body, filtered_modifications)
+                logger.info(f"✓ Applied modifications: {filtered_modifications}")
             
             # Add authentication token if required
             if tool_info.get("authentication_required", False):
@@ -74,8 +128,17 @@ class APIExecutor:
                 else:
                     logger.warning("⚠ API requires authentication but no token provided")
             
+            # For multipart/form-data, remove Content-Type header to let requests handle boundary
+            if is_multipart:
+                # Remove Content-Type header - requests will add it with proper boundary
+                headers.pop("Content-Type", None)
+                # Also remove accept and cache-control if they're not needed for multipart
+                # But keep Authorization and other important headers
+            
             # Log request details
             logger.info(f"🚀 Executing {method} request to: {url}")
+            if query_parameters:
+                logger.info(f"📋 Query parameters: {query_parameters}")
             logger.debug(f"Headers: {headers}")
             logger.debug(f"Body: {json.dumps(request_body, indent=2)}")
             
@@ -85,13 +148,56 @@ class APIExecutor:
             
             # Make API call
             if method.upper() == "GET":
-                response = requests.get(url, headers=headers, params=request_body, timeout=30)
+                response = requests.get(url, headers=headers, params={**query_parameters, **request_body}, timeout=30)
             elif method.upper() == "POST":
-                response = requests.post(url, headers=headers, json=request_body, timeout=30)
+                if is_multipart:
+                    # Handle multipart/form-data
+                    # For multipart form data, use files= parameter with tuple values
+                    # Convert nested objects to URL-encoded JSON strings (as shown in curl example)
+                    import urllib.parse
+                    form_data = {}
+                    for key, value in request_body.items():
+                        if isinstance(value, dict):
+                            # Convert nested dict to JSON string, then URL-encode it
+                            json_str = json.dumps(value)
+                            url_encoded_json = urllib.parse.quote(json_str)
+                            # Use tuple format: (filename, content, content_type) or (filename, content)
+                            # None as filename means it's a form field, not a file
+                            form_data[key] = (None, url_encoded_json)
+                        elif isinstance(value, list):
+                            # Convert list to JSON string, then URL-encode it
+                            json_str = json.dumps(value)
+                            url_encoded_json = urllib.parse.quote(json_str)
+                            form_data[key] = (None, url_encoded_json)
+                        else:
+                            # Regular string values - use tuple format for consistency
+                            form_data[key] = (None, str(value) if value is not None else "")
+                    # Use files= parameter to send as multipart/form-data
+                    # This matches the curl --form behavior
+                    response = requests.post(url, headers=headers, files=form_data, params=query_parameters, timeout=30)
+                else:
+                    response = requests.post(url, headers=headers, json=request_body, params=query_parameters, timeout=30)
             elif method.upper() == "PUT":
-                response = requests.put(url, headers=headers, json=request_body, timeout=30)
+                if is_multipart:
+                    import urllib.parse
+                    form_data = {}
+                    for key, value in request_body.items():
+                        if isinstance(value, dict):
+                            json_str = json.dumps(value)
+                            url_encoded_json = urllib.parse.quote(json_str)
+                            form_data[key] = (None, url_encoded_json)
+                        elif isinstance(value, list):
+                            json_str = json.dumps(value)
+                            url_encoded_json = urllib.parse.quote(json_str)
+                            form_data[key] = (None, url_encoded_json)
+                        else:
+                            form_data[key] = (None, str(value) if value is not None else "")
+                    # Use files= parameter to send as multipart/form-data
+                    response = requests.put(url, headers=headers, files=form_data, params=query_parameters, timeout=30)
+                else:
+                    response = requests.put(url, headers=headers, json=request_body, params=query_parameters, timeout=30)
             elif method.upper() == "DELETE":
-                response = requests.delete(url, headers=headers, json=request_body, timeout=30)
+                response = requests.delete(url, headers=headers, json=request_body, params=query_parameters, timeout=30)
             else:
                 return {
                     "success": False,
