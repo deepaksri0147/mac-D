@@ -11,6 +11,7 @@ from langchain.agents.middleware import dynamic_prompt, ModelRequest
 
 from embedding_service_ollama import OllamaEmbeddingService, create_ollama_embedding_service
 from neo4j_enhanced_manager import EnhancedNeo4jToolManager
+from agent_workflow import AgentWorkflow # Import AgentWorkflow
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +43,15 @@ def tool_prompt(request: ModelRequest) -> str:
         return base_prompt.format(tool_info=tool_info)
     return "You are a helpful assistant."
 
-class ToolWorkflow:
+class MultiStepToolWorkflow:
     """
-    Manages the workflow for finding relevant tools based on agent search results
-    and executing a tool using an LLM agent.
+    Manages a multi-step workflow for finding relevant agents, finding tools for that agent,
+    and executing a sequence of tools using an LLM agent.
     """
     def __init__(self, max_retries: int = 3):
         self.embedding_service: OllamaEmbeddingService = create_ollama_embedding_service()
         self.tool_manager: EnhancedNeo4jToolManager = EnhancedNeo4jToolManager()
+        self.agent_workflow = AgentWorkflow(max_retries=max_retries) # Initialize AgentWorkflow
         self.llm = ChatOllama(model=MODEL_NAME, base_url=OLLAMA_BASE_URL, reasoning=True)
         self.tools = [demo_tool]
         self.max_retries = max_retries
@@ -87,22 +89,9 @@ class ToolWorkflow:
         if not potential_tools:
             return None
 
-        prompt_text = """You are an expert at selecting the most relevant tools to answer a user's query.
-Based on the user's query and the list of available tools, your task is to identify the best tools to use.
-
-User Query: "{query}"
-
-Available Tools:
-{potential_tools}
-
-Carefully review the user's query and the description and parameters of each tool.
-Your response MUST be a JSON object containing a list of `tool_ids` for the best tools to use, in order of relevance.
-Do not provide any explanation or extra text.
-
-Example response:
-{{
-  "tool_ids": ["tool-id-1", "tool-id-2"]
-}}"""
+        with open("prompts/tool_filter_prompt.md", "r") as f:
+            prompt_text = f.read()
+            
         prompt = ChatPromptTemplate.from_template(prompt_text)
         chain = prompt | self.llm
         
@@ -143,43 +132,87 @@ Example response:
         logger.error(f"Failed to get valid LLM tool filtering output after {self.max_retries} attempts.")
         return []
 
-    def execute_tool_with_agent(self, query: str, tools: List[Dict[str, Any]]) -> Any:
+    def execute_tool_with_agent(self, query: str, tools: List[Dict[str, Any]], max_steps: int = 5) -> Any:
         """
-        Executes a tool using the LLM agent based on the user query and available tools.
+        Executes a sequence of tools using a ReAct-style agent within a manual loop.
         """
         if not tools:
             logger.warning("No tools available for execution.")
             return {"error": "No tools found to execute."}
 
-        # The `create_agent` function in the constructor already has the tools.
-        # We invoke the agent with the user's query.
-        logger.info(f"Invoking agent for query: '{query}'")
-        try:
-            result = self.agent.invoke(
-                {"messages": [{"role": "user", "content": query}]},
-                context={"tools": tools}
-            )
-            return result
-        except Exception as e:
-            logger.error(f"Error executing tool with agent: {e}")
-            return {"error": str(e)}
+        history = [{"role": "user", "content": query}]
+        
+        for i in range(max_steps):
+            logger.info(f"--- Step {i + 1}/{max_steps} ---")
+            logger.info(f"Current history: {history}")
+
+            try:
+                # Invoke the agent with the current history
+                # Invoke the agent. The response will be a dictionary containing the new message chain.
+                result_dict = self.agent.invoke(
+                    {"messages": history},
+                    context={"tools": tools}
+                )
+                
+                # Extract the latest message from the agent's response
+                agent_response = result_dict['messages'][-1]
+
+                # Add the agent's response to our history
+                history.append(agent_response)
+
+                # Check if the agent's response is a final answer (AIMessage without tool calls)
+                # or a tool call.
+                if agent_response.tool_calls:
+                    # Agent wants to call a tool. The framework has already executed it and the result
+                    # is the last message in the sequence (`agent_response` is a ToolMessage).
+                    # We just need to log it and continue the loop.
+                    logger.info(f"Agent called tools, continuing loop.")
+                elif isinstance(agent_response.content, str):
+                    # This is a final answer from the agent (AIMessage with string content and no tool_calls).
+                    logger.info(f"Agent provided final answer: {agent_response.content}")
+                    return {"final_answer": agent_response.content, "history": history}
+                else:
+                    # This branch handles ToolMessage content, which is fine. We just log and continue.
+                    logger.info(f"Continuing loop with new history item of type: {type(agent_response)}")
+
+
+            except Exception as e:
+                logger.error(f"Error executing tool with agent at step {i + 1}: {e}")
+                return {"error": str(e), "history": history}
+
+        logger.warning(f"Workflow did not complete within {max_steps} steps.")
+        return {"error": "Max steps reached", "history": history}
 
     def run_workflow(self, query: str) -> Any:
         """
         Runs the complete workflow:
         1. Find relevant tools using vector search.
         2. Filter and select the best tools using an LLM.
-        3. Execute the agent with the selected tools.
+        1. Find a relevant agent.
+        2. Find relevant tools for that agent.
+        3. Filter and select the best tools using an LLM.
+        4. Execute the agent with the selected tools.
         """
-        logger.info(f"Starting tool workflow for query: '{query}'")
+        logger.info(f"Starting multi-step tool workflow for query: '{query}'")
 
-        # 1. Find relevant tools via vector search
+        # 1. Find relevant agent(s)
+        ranked_agent_ids = self.agent_workflow.run_workflow(query)
+        if not ranked_agent_ids:
+            logger.warning("No relevant agents found.")
+            return {"error": "No relevant agents found for your query."}
+        
+        # For now, let's proceed with the top-ranked agent
+        top_agent_id = ranked_agent_ids[0]
+        logger.info(f"Proceeding with top-ranked agent: {top_agent_id}")
+
+        # 2. Find relevant tools via vector search (now filtered by agent context)
+        # Placeholder for filtering tools by agent. For now, we search all tools.
         potential_tools = self.find_relevant_tools(query)
         if not potential_tools:
             logger.warning("No potential tools found from vector search.")
             return {"error": "No relevant tools found."}
 
-        # 2. Filter tools with LLM to get the best ones
+        # 3. Filter tools with LLM to get the best ones
         best_tool_ids = self.filter_tools_with_llm(query, potential_tools)
         if not best_tool_ids:
             logger.warning("LLM could not select any suitable tools.")
@@ -188,7 +221,7 @@ Example response:
         # Find the full details of the selected tools
         selected_tools = [tool for tool in potential_tools if tool.get("tool_id") in best_tool_ids]
 
-        # 3. Execute the agent with the selected tools
+        # 4. Execute the agent with the selected tools
         execution_result = self.execute_tool_with_agent(query, selected_tools)
 
         logger.info("Tool workflow completed.")
@@ -196,11 +229,11 @@ Example response:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    tool_workflow = ToolWorkflow()
+    multi_step_workflow = MultiStepToolWorkflow()
 
     user_query = "call the ingest data api"
-    result = tool_workflow.run_workflow(user_query)
+    result = multi_step_workflow.run_workflow(user_query)
 
-    print("\n--- Tool Execution Result ---")
+    print("\n--- Multi-Step Tool Execution Result ---")
     print(result)
     print("---------------------------")
