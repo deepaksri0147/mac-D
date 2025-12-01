@@ -66,7 +66,7 @@ class DiscoveryAgentManager:
             try:
                 session.run("""
                     MATCH (a:Agent)
-                    WHERE NOT EXISTS(a.tools)
+                    WHERE a.tools IS NULL
                     SET a.tools = []
                 """)
                 logger.info("✓ Migrated existing Agent nodes to include 'tools' property")

@@ -5,13 +5,17 @@ from typing import Dict, Any, List, TypedDict, Optional
 
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import HumanMessage
+from langchain_core.messages import messages_from_dict
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langchain.agents.middleware import dynamic_prompt, ModelRequest
 
 from embedding_service_ollama import OllamaEmbeddingService, create_ollama_embedding_service
 from neo4j_enhanced_manager import EnhancedNeo4jToolManager
-from agent_workflow import AgentWorkflow # Import AgentWorkflow
+from agent_workflow import AgentWorkflow
+from session_manager import SessionManager
+from api_executor import APIExecutor, create_api_executor
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +23,33 @@ logger = logging.getLogger(__name__)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama-keda.mobiusdtaas.ai")
 MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "qwen3:30b")
 
+tool_manager = EnhancedNeo4jToolManager()
+api_executor = create_api_executor()
+
 @tool
 def demo_tool(tool_id: str, request_body: Dict[str, Any]) -> Dict[str, Any]:
     """
-    A demo tool that simulates calling an API with a tool ID and request body.
-    In a real scenario, this would make an HTTP request.
+    Finds a tool by its ID in Neo4j, retrieves its details, and executes an API call.
     """
-    logger.info(f"Executing demo_tool with tool_id: {tool_id} and request_body: {request_body}")
-    # Simulate an API call
-    return {"status": "success", "tool_id": tool_id, "response": f"API call for {tool_id} was successful"}
+    logger.info(f"Executing tool with tool_id: {tool_id} and request_body: {request_body}")
+    
+    try:
+        tool_info = tool_manager.get_tool_by_id(tool_id)
+        if not tool_info:
+            error_message = f"Tool with tool_id '{tool_id}' not found."
+            logger.error(error_message)
+            return {"status": "error", "error": error_message}
+
+        result = api_executor.execute_api(
+            tool_info=tool_info,
+            parameter_modifications=request_body
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"An unexpected error occurred in demo_tool: {e}", exc_info=True)
+        return {"status": "error", "error": f"An unexpected error occurred: {e}"}
+
 
 class Context(TypedDict):
     tools: List[Dict[str, Any]]
@@ -39,8 +61,29 @@ def tool_prompt(request: ModelRequest) -> str:
     with open("prompts/dynamic_agent_prompt.md", "r") as f:
         base_prompt = f.read()
     if tools:
-        tool_info = "\n".join([f"- {tool['name']}: {tool['description']}" for tool in tools])
-        return base_prompt.format(tool_info=tool_info)
+        tool_info_list = []
+        for tool in tools:
+            tool_details = {
+                "tool_id": tool.get("tool_id"),
+                "name": tool.get("name"),
+                "description": tool.get("description"),
+                "requestBody": tool.get("requestBody"),
+                "queryParameters": tool.get("queryParameters"),
+                "field_descriptions": tool.get("field_descriptions"),
+                "required_fields": tool.get("required_fields"),
+                "authentication_required": tool.get("authentication_required", False),
+                "returns_token": tool.get("returns_token", False),
+            }
+            tool_info_list.append(json.dumps(tool_details, indent=2))
+        
+        tool_info = "\n".join(tool_info_list)
+        
+        # Print the formatted tool information that will be passed to the agent
+        print("--- Tools Provided to Agent ---")
+        print(tool_info)
+        print("-----------------------------")
+        
+        return base_prompt.replace("{tool_info}", tool_info)
     return "You are a helpful assistant."
 
 class MultiStepToolWorkflow:
@@ -50,13 +93,13 @@ class MultiStepToolWorkflow:
     """
     def __init__(self, max_retries: int = 3):
         self.embedding_service: OllamaEmbeddingService = create_ollama_embedding_service()
-        self.tool_manager: EnhancedNeo4jToolManager = EnhancedNeo4jToolManager()
-        self.agent_workflow = AgentWorkflow(max_retries=max_retries) # Initialize AgentWorkflow
+        self.agent_workflow = AgentWorkflow(max_retries=max_retries)
+        self.session_manager = SessionManager()
         self.llm = ChatOllama(model=MODEL_NAME, base_url=OLLAMA_BASE_URL, reasoning=True)
         self.tools = [demo_tool]
         self.max_retries = max_retries
 
-        self.tool_manager.create_indexes()
+        tool_manager.create_indexes()
 
         self.agent = create_agent(
             self.llm,
@@ -74,7 +117,7 @@ class MultiStepToolWorkflow:
         query_embedding = self.embedding_service.create_embedding(query)
 
         logger.info(f"Searching for relevant tools with limit={limit}, threshold={similarity_threshold}")
-        return self.tool_manager.search_tools_by_embedding(
+        return tool_manager.search_tools_by_embedding(
             query_embedding=query_embedding,
             limit=limit,
             similarity_threshold=similarity_threshold
@@ -132,58 +175,45 @@ class MultiStepToolWorkflow:
         logger.error(f"Failed to get valid LLM tool filtering output after {self.max_retries} attempts.")
         return []
 
-    def execute_tool_with_agent(self, query: str, tools: List[Dict[str, Any]], max_steps: int = 5) -> Any:
+    def execute_tool_with_agent(self, session_id: str, tools: List[Dict[str, Any]], max_steps: int = 5) -> Any:
         """
-        Executes a sequence of tools using a ReAct-style agent within a manual loop.
+        Executes a tool or sequence of tools using a ReAct-style agent.
+        The agent is expected to provide a final answer directly.
         """
         if not tools:
             logger.warning("No tools available for execution.")
             return {"error": "No tools found to execute."}
 
-        history = [{"role": "user", "content": query}]
+        history_dicts = self.session_manager.load_history(session_id)
+        history = messages_from_dict(history_dicts)
         
-        for i in range(max_steps):
-            logger.info(f"--- Step {i + 1}/{max_steps} ---")
-            logger.info(f"Current history: {history}")
+        logger.info(f"--- Executing Agent (Session: {session_id}) ---")
+        logger.info(f"Current history: {history}")
 
-            try:
-                # Invoke the agent with the current history
-                # Invoke the agent. The response will be a dictionary containing the new message chain.
-                result_dict = self.agent.invoke(
-                    {"messages": history},
-                    context={"tools": tools}
-                )
-                
-                # Extract the latest message from the agent's response
-                agent_response = result_dict['messages'][-1]
+        try:
+            # Invoke the agent with the current history
+            result_dict = self.agent.invoke(
+                {"messages": history},
+                context={"tools": tools}
+            )
+            
+            # The agent's final answer is expected in the last message
+            print("response from agent ",result_dict)
+            agent_response = result_dict['messages'][-1]
 
-                # Add the agent's response to our history
-                history.append(agent_response)
+            # Save the final response to history
+            self.session_manager.save_message(session_id, agent_response)
+            history.append(agent_response)
 
-                # Check if the agent's response is a final answer (AIMessage without tool calls)
-                # or a tool call.
-                if agent_response.tool_calls:
-                    # Agent wants to call a tool. The framework has already executed it and the result
-                    # is the last message in the sequence (`agent_response` is a ToolMessage).
-                    # We just need to log it and continue the loop.
-                    logger.info(f"Agent called tools, continuing loop.")
-                elif isinstance(agent_response.content, str):
-                    # This is a final answer from the agent (AIMessage with string content and no tool_calls).
-                    logger.info(f"Agent provided final answer: {agent_response.content}")
-                    return {"final_answer": agent_response.content, "history": history}
-                else:
-                    # This branch handles ToolMessage content, which is fine. We just log and continue.
-                    logger.info(f"Continuing loop with new history item of type: {type(agent_response)}")
+            # Return the final answer
+            logger.info(f"Agent provided final answer: {agent_response.content}")
+            return {"final_answer": agent_response.content, "history": history}
 
+        except Exception as e:
+            logger.error(f"Error executing tool with agent: {e}")
+            return {"error": str(e), "history": history}
 
-            except Exception as e:
-                logger.error(f"Error executing tool with agent at step {i + 1}: {e}")
-                return {"error": str(e), "history": history}
-
-        logger.warning(f"Workflow did not complete within {max_steps} steps.")
-        return {"error": "Max steps reached", "history": history}
-
-    def run_workflow(self, query: str) -> Any:
+    def run_workflow(self, query: str, session_id: Optional[str] = None) -> Any:
         """
         Runs the complete workflow:
         1. Find relevant tools using vector search.
@@ -193,7 +223,18 @@ class MultiStepToolWorkflow:
         3. Filter and select the best tools using an LLM.
         4. Execute the agent with the selected tools.
         """
-        logger.info(f"Starting multi-step tool workflow for query: '{query}'")
+        if session_id:
+            logger.info(f"Continuing session {session_id} for query: '{query}'")
+            history = self.session_manager.load_history(session_id)
+        else:
+            session_id = self.session_manager.create_session_id()
+            logger.info(f"Starting new session {session_id} for query: '{query}'")
+            history = []
+        
+        # Add the new user message to the history and save it
+        user_message = HumanMessage(content=query)
+        history.append(user_message)
+        self.session_manager.save_message(session_id, user_message)
 
         # 1. Find relevant agent(s)
         ranked_agent_ids = self.agent_workflow.run_workflow(query)
@@ -218,22 +259,51 @@ class MultiStepToolWorkflow:
             logger.warning("LLM could not select any suitable tools.")
             return []
         
-        # Find the full details of the selected tools
         selected_tools = [tool for tool in potential_tools if tool.get("tool_id") in best_tool_ids]
-
-        # 4. Execute the agent with the selected tools
-        execution_result = self.execute_tool_with_agent(query, selected_tools)
+        print("selected tools",selected_tools)
+        execution_result = self.execute_tool_with_agent(session_id, selected_tools)
 
         logger.info("Tool workflow completed.")
         return execution_result
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    multi_step_workflow = MultiStepToolWorkflow()
+    workflow = MultiStepToolWorkflow()
+    session_id = workflow.session_manager.create_session_id()
 
-    user_query = "call the ingest data api"
-    result = multi_step_workflow.run_workflow(user_query)
+    print("--- Multi-Step Tool Workflow CLI ---")
+    print(f"New session started: {session_id}")
+    print("Type 'new' to start a new session, or 'exit' to quit.")
 
-    print("\n--- Multi-Step Tool Execution Result ---")
-    print(result)
-    print("---------------------------")
+    while True:
+        try:
+            user_query = input(f"\nUser (Session: {session_id[:8]}): ")
+
+            if user_query.lower() == 'exit':
+                print("Exiting workflow.")
+                break
+            
+            if user_query.lower() == 'new':
+                session_id = workflow.session_manager.create_session_id()
+                print(f"\n--- New session started: {session_id} ---")
+                continue
+
+            if not user_query:
+                continue
+
+            result = workflow.run_workflow(user_query, session_id=session_id)
+
+            print("\n--- Agent Response ---")
+            if "final_answer" in result:
+                print(result["final_answer"])
+            elif "error" in result:
+                print(f"An error occurred: {result['error']}")
+            
+            print("----------------------")
+
+        except KeyboardInterrupt:
+            print("\nExiting workflow.")
+            break
+        except Exception as e:
+            logger.error(f"A critical error occurred in the CLI: {e}")
+            break
