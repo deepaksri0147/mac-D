@@ -162,6 +162,78 @@ SCHEMA_CREATION_TOOL_ENHANCED = {
 }
 
 
+CREATE_TIDB_SCHEMA_TOOL_ENHANCED = {
+    "tool_id": "create_tidb_schema_api",
+    "name": "TiDB Schema Creation",
+    "agent_id": "pi_agent",  # Belongs to PI Agent
+    "description": "Creates a new entity schema/table in TiDB. Defines the structure and attributes for storing data in PI using TiDB as the primary database.",
+    "keywords": [
+        "schema", "table", "tidb", "create schema", "entity", "tidb schema", "create tidb table"
+    ],
+    "schema": {
+        "url": "https://ig.gov-cloud.ai/pi-entity-service-dbaas/v1.0/schemas",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer {token}"
+        },
+        "requestBody": {
+            "name": "Default Schema",
+            "description": "Default schema description",
+            "universes": ["UNIVERSE_ID_PLACEHOLDER"],
+            "tags": {
+                "BLUE": ["SCHEMA"]
+            },
+            "primaryDb": "TIDB",
+            "piFeatures": {
+                "COHORTS": {"COHORTS": ["TIDB"]},
+                "CONTEXT": {"CONTEXT": ["TIDB"]},
+                "BIGQUERY": {"BIGQUERY": ["TIDB"]}
+            },
+            "attributes": [
+                {
+                    "name": "id",
+                    "type": {"type": "string"},
+                    "required": True
+                }
+            ],
+            "primaryKey": ["id"],
+            "dataReadAccess": "PUBLIC",
+            "dataWriteAccess": "PUBLIC",
+            "metadataReadAccess": "PUBLIC",
+            "metadataWriteAccess": "PUBLIC",
+            "visibility": "PUBLIC"
+        },
+        "field_descriptions": {
+            "name": "Name of the schema/table. Must be unique within the universe.",
+            "description": "Description of what data this schema stores.",
+            "universes": "Array of universe IDs where this schema should be created. Use dataverse ID from create_dataverse_api.",
+            "tags": "Categorization tags. Format: {color: [tag_list]}",
+            "primaryDb": "Primary database type. Valid values: MONGO, POSTGRES, MYSQL, TIDB",
+            "piFeatures": "PI features that can access this schema. Maps features to database types. For TiDB, use 'TIDB' instead of 'MONGO'.",
+            "attributes": "Array of column/field definitions. Each attribute object must have: name (string), type (object with 'type' field, e.g., {\"type\": \"string\"} or {\"type\": \"number\"}), and required (boolean). Example: [{\"name\": \"id\", \"type\": {\"type\": \"string\"}, \"required\": true}]",
+            "primaryKey": "Array of field names that form the primary key. Must exist in attributes.",
+            "dataReadAccess": "Who can read data. Values: PUBLIC, PRIVATE, RESTRICTED",
+            "dataWriteAccess": "Who can write data. Values: PUBLIC, PRIVATE, RESTRICTED",
+            "metadataReadAccess": "Who can read schema metadata. Values: PUBLIC, PRIVATE, RESTRICTED",
+            "metadataWriteAccess": "Who can modify schema metadata. Values: PUBLIC, PRIVATE, RESTRICTED",
+            "visibility": "Overall schema visibility. Values: PUBLIC, PRIVATE"
+        },
+        "required_fields": ["name", "description", "universes", "tags", "primaryDb", "piFeatures", "attributes", "primaryKey"],
+        "authentication_required": True,
+        "returns_token": False
+    },
+    "dependencies": ["token_generation_api", "create_dataverse_api"],
+    "example_prompts": [
+        "create a tidb schema",
+        "create tidb table",
+        "create schema in tidb",
+        "define new tidb schema with fields",
+        "create tidb schema for data storage"
+    ]
+}
+
+
 DATA_INGESTION_TOOL_ENHANCED = {
     "tool_id": "ingest_data_api",
     "name": "Ingest Data into Schema",
@@ -346,6 +418,7 @@ ALL_TOOLS_ENHANCED = [
     TOKEN_GENERATION_TOOL_ENHANCED,
     DATAVERSE_CREATION_TOOL_ENHANCED,
     SCHEMA_CREATION_TOOL_ENHANCED,
+    CREATE_TIDB_SCHEMA_TOOL_ENHANCED,
     DATA_INGESTION_TOOL_ENHANCED,
     RUNRUN_TOKEN_GENERATION_TOOL_ENHANCED,
     VULNERABILITY_CHECK_TOOL_ENHANCED

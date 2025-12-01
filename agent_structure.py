@@ -8,23 +8,26 @@ Each agent has its own Neo4j database containing its tools
 PI_AGENT = {
     "agent_id": "pi_agent",
     "name": "PI Agent",
-    "description": "Platform Intelligence Agent that handles dataverse creation, schema management, and data ingestion operations in the PI platform. This agent manages the complete data lifecycle from creating logical containers (dataverses) to defining data structures (schemas) and ingesting data records.",
+    "description": "Platform Intelligence Agent that handles dataverse creation, schema management, and data ingestion operations in the PI platform. This agent manages the complete data lifecycle from creating logical containers (dataverses) to defining data structures (schemas) in MongoDB and TiDB, and ingesting data records.",
     "keywords": [
-        "pi", "platform intelligence", "dataverse", "universe", "schema", "mongo", "mongodb",
+        "pi", "platform intelligence", "dataverse", "universe", "schema", "mongo", "mongodb", "tidb",
         "data ingestion", "create dataverse", "create schema", "ingest data", "insert data",
-        "token generation", "authentication", "login"
+        "token generation", "authentication", "login", "create tidb schema", "tidb table"
     ],
     "database_name": "piagent",  # Neo4j database name for this agent
     "tools": [
         "token_generation_api",
         "create_dataverse_api",
         "create_mongo_schema_api",
+        "create_tidb_schema_api",
         "ingest_data_api"
     ],
     "example_prompts": [
         "generate token",
         "create a dataverse",
         "create a schema",
+        "create a tidb schema",
+        "create tidb table",
         "ingest data into schema",
         "create universe for testing",
         "insert data into mongo schema",
