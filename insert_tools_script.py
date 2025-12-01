@@ -86,10 +86,11 @@ def insert_tool(tool: Dict[str, Any], agent_database: str = None) -> bool:
             if agent_id:
                 # Map agent_id to database name
                 agent_db_map = {
-                    "pi_agent": "piagent",
-                    "runrun_agent": "runrun"
+                    "pi_agent": "neo4j",
+                    "runrun_agent": "neo4j"
                 }
                 agent_database = agent_db_map.get(agent_id)
+                logger.info(f"Using agent_database '{agent_database}' for tool '{tool.get('tool_id')}'")
                 if not agent_database:
                     logger.error(f"❌ Unknown agent_id: {agent_id}")
                     return False
@@ -198,8 +199,8 @@ def insert_all_tools_in_order() -> bool:
     for agent_id, tools in tools_by_agent.items():
         # Map agent_id to database name
         agent_db_map = {
-            "pi_agent": "piagent",
-            "runrun_agent": "runrun"
+            "pi_agent": "neo4j",
+            "runrun_agent": "neo4j"
         }
         agent_database = agent_db_map.get(agent_id)
         if not agent_database:
