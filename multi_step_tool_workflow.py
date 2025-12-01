@@ -63,7 +63,19 @@ def tool_prompt(request: ModelRequest) -> str:
     if tools:
         tool_info_list = []
         for tool in tools:
-            tool_info_list.append(f"- {tool['name']} (ID: {tool['tool_id']}): {tool['description']}")
+            tool_details = {
+                "tool_id": tool.get("tool_id"),
+                "name": tool.get("name"),
+                "description": tool.get("description"),
+                "requestBody": tool.get("requestBody"),
+                "queryParameters": tool.get("queryParameters"),
+                "field_descriptions": tool.get("field_descriptions"),
+                "required_fields": tool.get("required_fields"),
+                "authentication_required": tool.get("authentication_required", False),
+                "returns_token": tool.get("returns_token", False),
+            }
+            tool_info_list.append(json.dumps(tool_details, indent=2))
+        
         tool_info = "\n".join(tool_info_list)
         
         # Print the formatted tool information that will be passed to the agent
@@ -71,7 +83,7 @@ def tool_prompt(request: ModelRequest) -> str:
         print(tool_info)
         print("-----------------------------")
         
-        return base_prompt.format(tool_info=tool_info)
+        return base_prompt.replace("{tool_info}", tool_info)
     return "You are a helpful assistant."
 
 class MultiStepToolWorkflow:
