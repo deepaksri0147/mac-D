@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 class EnhancedNeo4jToolManager:
     """Manages API tools in Neo4j with embeddings and field descriptions"""
     
-    def __init__(self, uri: str = None, user: str = None, password: str = None, database: str = None):
+    def __init__(self, uri: str = None, user: str = None, password: str = None, database: str = "neo4j"):
         self.uri = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self.user = user or os.getenv("NEO4J_USER", "neo4j")
-        self.password = password or os.getenv("NEO4J_PASSWORD", "password")
-        self.database = database  # Agent-specific database name (e.g., "piagent", "runrun")
+        self.password = password or os.getenv("NEO4J_PASSWORD", "password123")
+        self.database = database
         self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
         
     def close(self):
@@ -82,7 +82,7 @@ class EnhancedNeo4jToolManager:
                         t.method = $method,
                         t.headers = $headers,
                         t.requestBody = $requestBody,
-                        t.queryParameters = $queryParameters,
+                        t.query_parameters = $queryParameters,
                         t.field_descriptions = $field_descriptions,
                         t.required_fields = $required_fields,
                         t.authentication_required = $authentication_required,
@@ -102,7 +102,7 @@ class EnhancedNeo4jToolManager:
                     method=tool["schema"].get("method", "POST"),
                     headers=str(tool["schema"].get("headers", {})),
                     requestBody=str(tool["schema"].get("requestBody", {})),
-                    queryParameters=str(tool["schema"].get("queryParameters", {})),
+                    queryParameters=str(tool["schema"].get("query_parameters", {})),
                     field_descriptions=str(tool["schema"].get("field_descriptions", {})),
                     required_fields=tool["schema"].get("required_fields", []),
                     authentication_required=tool["schema"].get("authentication_required", False),
@@ -173,6 +173,7 @@ class EnhancedNeo4jToolManager:
         """
         try:
             session_kwargs = {"database": self.database} if self.database else {}
+            print(session_kwargs)
             with self.driver.session(**session_kwargs) as session:
                 result = session.run("""
                     CALL db.index.vector.queryNodes('tool_embeddings', $limit, $query_embedding)
@@ -223,6 +224,53 @@ class EnhancedNeo4jToolManager:
         except Exception as e:
             logger.error(f"✗ Error searching tools: {e}")
             return []
+
+    def get_tool_by_id(self, tool_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves a single tool by its tool_id.
+        """
+        try:
+            session_kwargs = {"database": self.database} if self.database else {}
+            with self.driver.session(**session_kwargs) as session:
+                result = session.run("""
+                    MATCH (node:Tool {tool_id: $tool_id})
+                    RETURN node.tool_id as tool_id,
+                           node.name as name,
+                           node.description as description,
+                           node.url as url,
+                           node.method as method,
+                           node.headers as headers,
+                           node.requestBody as requestBody,
+                           node.queryParameters as queryParameters,
+                           node.field_descriptions as field_descriptions,
+                           node.required_fields as required_fields,
+                           node.authentication_required as authentication_required,
+                           node.returns_token as returns_token,
+                           node.token_field as token_field
+                """, tool_id=tool_id)
+                
+                record = result.single()
+                if not record:
+                    return None
+
+                return {
+                    "tool_id": record["tool_id"],
+                    "name": record["name"],
+                    "description": record["description"],
+                    "url": record["url"],
+                    "method": record["method"],
+                    "headers": eval(record["headers"]) if record["headers"] else {},
+                    "requestBody": eval(record["requestBody"]) if record["requestBody"] else {},
+                    "queryParameters": eval(record["queryParameters"]) if record.get("queryParameters") else {},
+                    "field_descriptions": eval(record["field_descriptions"]) if record["field_descriptions"] else {},
+                    "required_fields": record["required_fields"],
+                    "authentication_required": record["authentication_required"],
+                    "returns_token": record["returns_token"],
+                    "token_field": record["token_field"],
+                }
+        except Exception as e:
+            logger.error(f"✗ Error getting tool by ID '{tool_id}': {e}")
+            return None
     
     def get_tool_dependencies(self, tool_id: str) -> List[str]:
         """
