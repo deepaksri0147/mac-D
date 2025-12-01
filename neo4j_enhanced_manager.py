@@ -18,11 +18,7 @@ class EnhancedNeo4jToolManager:
         self.uri = uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self.user = user or os.getenv("NEO4J_USER", "neo4j")
         self.password = password or os.getenv("NEO4J_PASSWORD", "password123")
-<<<<<<< HEAD
         self.database = database  # Agent-specific database name (e.g., "piagent", "runrun")
-=======
-        self.database = database
->>>>>>> f6f9320fed1f1c3074d40af77764e7e990ca3169
         self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
         
     def close(self):
