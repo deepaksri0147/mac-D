@@ -35,7 +35,10 @@ class SessionManager:
             with open(filepath, "r") as f:
                 for line in f:
                     try:
-                        history.append(json.loads(line.strip()))
+                        entry = json.loads(line.strip())
+                        # Only append message entries to the history, not logs
+                        if "event" not in entry:
+                            history.append(entry)
                     except json.JSONDecodeError:
                         logger.warning(f"Could not parse line in {filepath}: {line}")
         return history
@@ -64,3 +67,11 @@ class SessionManager:
 
         with open(filepath, "a") as f:
             f.write(json.dumps(message_dict) + "\n")
+
+    def save_log(self, session_id: str, log_entry: Dict[str, Any]) -> None:
+        """
+        Saves a structured log entry to the session's JSONL file.
+        """
+        filepath = self.get_session_filepath(session_id)
+        with open(filepath, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
