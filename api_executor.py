@@ -17,13 +17,48 @@ class APIExecutor:
     """Execute API calls with parameter modifications"""
     
     def __init__(self):
-        self.token_cache = {}  # Cache tokens for reuse
-    
+        self.token_cache = {}  # Cache the auth token
+
+    def _get_auth_token(self) -> Optional[str]:
+        """
+        Fetches and caches the authentication token from a dedicated endpoint.
+        """
+        if "auth_token" in self.token_cache:
+            logger.info("✓ Using cached authentication token.")
+            return self.token_cache["auth_token"]
+
+        logger.info("🚀 No cached token found, fetching new authentication token...")
+        
+        token_url = "https://igs.gov-cloud.ai/mobius-iam-service/v1.0/login"
+        token_payload = {
+            "userName": "aidtaas@gaiansolutions.com",
+            "password": "Gaian@123",
+            "productId": "c2255be4-ddf6-449e-a1e0-b4f7f9a2b636",
+            "requestType": "TENANT"
+        }
+        
+        try:
+            response = requests.post(token_url, json=token_payload, timeout=30)
+            response.raise_for_status()
+            
+            response_data = response.json()
+            access_token = response_data.get("response", {}).get("accessToken")
+            print(access_token)
+            if access_token:
+                logger.info("✓ Successfully fetched new authentication token.")
+                self.token_cache["auth_token"] = access_token
+                return access_token
+            else:
+                logger.error("❌ 'accessToken' not found in token response.")
+                return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Failed to fetch authentication token: {e}")
+            return None
+
     def execute_api(
-        self, 
+        self,
         tool_info: Dict[str, Any],
-        parameter_modifications: Dict[str, Any] = None,
-        auth_token: Optional[str] = None
+        parameter_modifications: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """
         Execute an API call with optional parameter modifications
@@ -122,11 +157,13 @@ class APIExecutor:
             
             # Add authentication token if required
             if tool_info.get("authentication_required", False):
+                auth_token = self._get_auth_token()
                 if auth_token:
                     headers["Authorization"] = f"Bearer {auth_token}"
-                    logger.info("✓ Added authentication token to headers")
+                    logger.info("✓ Added authentication token to headers.")
                 else:
-                    logger.warning("⚠ API requires authentication but no token provided")
+                    logger.error("❌ API requires authentication, but failed to retrieve token.")
+                    return {"success": False, "error": "Failed to retrieve authentication token."}
             
             # For multipart/form-data, remove Content-Type header to let requests handle boundary
             if is_multipart:
