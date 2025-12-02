@@ -42,8 +42,8 @@ class APIExecutor:
             response.raise_for_status()
             
             response_data = response.json()
-            access_token = response_data.get("response", {}).get("accessToken")
-            print(access_token)
+            access_token = response_data.get("accessToken")
+            # print(access_token)
             if access_token:
                 logger.info("✓ Successfully fetched new authentication token.")
                 self.token_cache["auth_token"] = access_token
