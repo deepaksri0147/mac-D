@@ -2,6 +2,7 @@ import os
 import logging
 import json
 from typing import Dict, Any, List, TypedDict, Optional
+import asyncio
 
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
@@ -124,7 +125,7 @@ class MultiStepToolWorkflow:
             similarity_threshold=similarity_threshold
         )
     
-    def filter_tools_with_llm(self, query: str, potential_tools: List[Dict[str, Any]], session_id: Optional[str] = None) -> List[str]:
+    async def filter_tools_with_llm(self, query: str, potential_tools: List[Dict[str, Any]], session_id: Optional[str] = None) -> List[str]:
         """
         Uses the LLM to filter and select the best tools from a list of potential tools.
         Returns a list of tool_ids for the best tools.
@@ -152,13 +153,13 @@ class MultiStepToolWorkflow:
         ]
         potential_tools_json = json.dumps(filtered_tools, indent=2)
         
-        self.session_manager.save_log(session_id, {"event": "tool_filter_prompt", "prompt": prompt_text, "query": query, "potential_tools": potential_tools_json})
+        await self.session_manager.save_log(session_id, {"event": "tool_filter_prompt", "prompt": prompt_text, "query": query, "potential_tools": potential_tools_json})
 
         for attempt in range(self.max_retries):
             logger.info(f"Attempt {attempt + 1}/{self.max_retries} to filter tools with LLM.")
             try:
-                response = chain.invoke({"query": query, "potential_tools": potential_tools_json})
-                self.session_manager.save_log(session_id, {"event": "tool_filter_llm_response", "attempt": attempt + 1, "response": response.content.strip()})
+                response = await chain.ainvoke({"query": query, "potential_tools": potential_tools_json})
+                await self.session_manager.save_log(session_id, {"event": "tool_filter_llm_response", "attempt": attempt + 1, "response": response.content.strip()})
                 
                 result_json = json.loads(response.content.strip())
                 
@@ -177,7 +178,7 @@ class MultiStepToolWorkflow:
         logger.error(f"Failed to get valid LLM tool filtering output after {self.max_retries} attempts.")
         return []
 
-    def execute_tool_with_agent(self, session_id: str, tools: List[Dict[str, Any]], max_steps: int = 5) -> Any:
+    async def execute_tool_with_agent(self, session_id: str, tools: List[Dict[str, Any]], max_steps: int = 5) -> Any:
         """
         Executes a tool or sequence of tools using a ReAct-style agent.
         The agent is expected to provide a final answer directly.
@@ -194,7 +195,7 @@ class MultiStepToolWorkflow:
 
         try:
             # Invoke the agent with the current history
-            result_dict = self.agent.invoke(
+            result_dict = await self.agent.ainvoke(
                 {"messages": history},
                 context={"tools": tools}
             )
@@ -206,7 +207,7 @@ class MultiStepToolWorkflow:
             # Save only the new messages from the agent
             new_messages = agent_messages[len(history):]
             for message in new_messages:
-                self.session_manager.save_message(session_id, message)
+                await self.session_manager.save_message(session_id, message)
             
             final_answer = agent_messages[-1].content if agent_messages else "No response."
 
@@ -218,7 +219,7 @@ class MultiStepToolWorkflow:
             logger.error(f"Error executing tool with agent: {e}")
             return {"error": str(e), "history": history}
 
-    def run_workflow(self, query: str, session_id: Optional[str] = None) -> Any:
+    async def run_workflow(self, query: str, session_id: Optional[str] = None) -> Any:
         """
         Runs the complete workflow:
         1. Find relevant tools using vector search.
@@ -240,18 +241,18 @@ class MultiStepToolWorkflow:
         # Add the new user message to the history and save it
         user_message = HumanMessage(content=query)
         history.append(user_message)
-        self.session_manager.save_message(session_id, user_message)
+        await self.session_manager.save_message(session_id, user_message)
         if not self.selected_tools:
             print("--- No tools found in session, searching for new tools... ---")
             # 1. Find relevant agent(s)
-            self.session_manager.save_log(session_id, {"event": "agent_search", "query": query})
-            ranked_agent_ids = self.agent_workflow.run_workflow(query, session_id=session_id, session_manager=self.session_manager)
+            await self.session_manager.save_log(session_id, {"event": "agent_search", "query": query})
+            ranked_agent_ids = await self.agent_workflow.run_workflow(query, session_id=session_id, session_manager=self.session_manager)
             if not ranked_agent_ids:
                 log_entry = {"event": "agent_search_failed", "query": query}
-                self.session_manager.save_log(session_id, log_entry)
+                await self.session_manager.save_log(session_id, log_entry)
                 logger.warning("No relevant agents found.")
                 return {"error": "No relevant agents found for your query."}
-            self.session_manager.save_log(session_id, {"event": "agent_search_completed", "ranked_agent_ids": ranked_agent_ids})
+            await self.session_manager.save_log(session_id, {"event": "agent_search_completed", "ranked_agent_ids": ranked_agent_ids})
             
             # For now, let's proceed with the top-ranked agent
             top_agent_id = ranked_agent_ids[0]
@@ -259,30 +260,30 @@ class MultiStepToolWorkflow:
 
             # 2. Find relevant tools via vector search (now filtered by agent context)
             # Placeholder for filtering tools by agent. For now, we search all tools.
-            self.session_manager.save_log(session_id, {"event": "tool_search", "query": query})
+            await self.session_manager.save_log(session_id, {"event": "tool_search", "query": query})
             potential_tools = self.find_relevant_tools(query)
             if not potential_tools:
-                self.session_manager.save_log(session_id, {"event": "tool_search_failed", "reason": "No potential tools found."})
+                await self.session_manager.save_log(session_id, {"event": "tool_search_failed", "reason": "No potential tools found."})
                 logger.warning("No potential tools found from vector search.")
                 return {"error": "No relevant tools found."}
-            self.session_manager.save_log(session_id, {"event": "tool_search_completed", "potential_tools_count": len(potential_tools)})
+            await self.session_manager.save_log(session_id, {"event": "tool_search_completed", "potential_tools_count": len(potential_tools)})
 
 
             # 3. Filter tools with LLM to get the best ones
-            self.session_manager.save_log(session_id, {"event": "tool_filtering_started"})
-            best_tool_ids = self.filter_tools_with_llm(query, potential_tools, session_id=session_id)
+            await self.session_manager.save_log(session_id, {"event": "tool_filtering_started"})
+            best_tool_ids = await self.filter_tools_with_llm(query, potential_tools, session_id=session_id)
             if not best_tool_ids:
-                self.session_manager.save_log(session_id, {"event": "tool_filtering_failed", "reason": "LLM could not select any suitable tools."})
+                await self.session_manager.save_log(session_id, {"event": "tool_filtering_failed", "reason": "LLM could not select any suitable tools."})
                 logger.warning("LLM could not select any suitable tools.")
                 return []
-            self.session_manager.save_log(session_id, {"event": "tool_filtering_completed", "selected_tool_ids": best_tool_ids})
+            await self.session_manager.save_log(session_id, {"event": "tool_filtering_completed", "selected_tool_ids": best_tool_ids})
             
             self.selected_tools = [tool for tool in potential_tools if tool.get("tool_id") in best_tool_ids]
         else:
             print("--- Reusing tools from the current session. ---")
         
         print("selected tools", self.selected_tools)
-        execution_result = self.execute_tool_with_agent(session_id, self.selected_tools)
+        execution_result = await self.execute_tool_with_agent(session_id, self.selected_tools)
 
 
         logger.info("Tool workflow completed.")
@@ -296,43 +297,50 @@ if __name__ == "__main__":
     print("--- Multi-Step Tool Workflow CLI ---")
     print("Type 'new' to start a new session, or 'exit' to quit.")
 
-    while True:
-        try:
-            if session_id:
-                user_query = input(f"\nUser (Session: {session_id[:8]}): ")
-            else:
-                user_query = input(f"\nUser: ")
+    async def main():
+        global session_id
+        while True:
+            try:
+                if session_id:
+                    user_query = input(f"\nUser (Session: {session_id[:8]}): ")
+                else:
+                    user_query = input(f"\nUser: ")
 
-            if user_query.lower() == 'exit':
-                print("Exiting workflow.")
+                if user_query.lower() == 'exit':
+                    print("Exiting workflow.")
+                    break
+                
+                if user_query.lower() == 'new':
+                    session_id = workflow.session_manager.create_session_id()
+                    workflow.selected_tools = None
+                    print(f"\n--- New session started: {session_id} ---")
+                    continue
+
+                if not user_query:
+                    continue
+                
+                if not session_id:
+                    session_id = workflow.session_manager.create_session_id()
+                    print(f"--- New session started: {session_id} ---")
+
+                result = await workflow.run_workflow(user_query, session_id=session_id)
+
+                print("\n--- Agent Response ---")
+                if "final_answer" in result:
+                    print(result["final_answer"])
+                elif "error" in result:
+                    print(f"An error occurred: {result['error']}")
+                
+                print("----------------------")
+
+            except KeyboardInterrupt:
+                print("\nExiting workflow.")
                 break
-            
-            if user_query.lower() == 'new':
-                session_id = workflow.session_manager.create_session_id()
-                workflow.selected_tools = None
-                print(f"\n--- New session started: {session_id} ---")
-                continue
-
-            if not user_query:
-                continue
-            
-            if not session_id:
-                session_id = workflow.session_manager.create_session_id()
-                print(f"--- New session started: {session_id} ---")
-
-            result = workflow.run_workflow(user_query, session_id=session_id)
-
-            print("\n--- Agent Response ---")
-            if "final_answer" in result:
-                print(result["final_answer"])
-            elif "error" in result:
-                print(f"An error occurred: {result['error']}")
-            
-            print("----------------------")
-
-        except KeyboardInterrupt:
-            print("\nExiting workflow.")
-            break
-        except Exception as e:
-            logger.error(f"A critical error occurred in the CLI: {e}")
-            break
+            except Exception as e:
+                logger.error(f"A critical error occurred in the CLI: {e}")
+                break
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nExiting workflow.")

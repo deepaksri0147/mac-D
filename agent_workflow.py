@@ -2,7 +2,8 @@ import os
 import logging
 from typing import Dict, Any, List, Optional
 import json # Import json for parsing LLM output
-
+import asyncio
+ 
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -79,18 +80,18 @@ class AgentWorkflow:
             logger.error(f"Error invoking LLM with agent for reranking (compatibility mode): {e}")
             return "[]" # Return empty list if LLM invocation fails or parsing fails
 
-    def rerank_agents_with_llm(self, query: str, potential_agents: List[Dict[str, Any]], session_id: Optional[str] = None, session_manager: Optional[Any] = None) -> List[str]:
+    async def rerank_agents_with_llm(self, query: str, potential_agents: List[Dict[str, Any]], session_id: Optional[str] = None, session_manager: Optional[Any] = None) -> List[str]:
         """
         Uses the LLM to filter and rerank the given potential agents based on the query.
         Returns a list of agent_ids in ranked order.
         """
-        def log(event: str, data: Dict[str, Any]):
+        async def log(event: str, data: Dict[str, Any]):
             if session_id and session_manager:
                 log_entry = {"event": event, **data}
-                session_manager.save_log(session_id, log_entry)
+                await session_manager.save_log(session_id, log_entry)
 
         logger.info(f"Reranking {len(potential_agents)} agents with LLM for query: '{query}'")
-        log("agent_rerank_started", {"query": query, "potential_agents_count": len(potential_agents)})
+        await log("agent_rerank_started", {"query": query, "potential_agents_count": len(potential_agents)})
         raw_prompt_template = self._load_prompt_template()
         
         prompt = ChatPromptTemplate.from_template(raw_prompt_template)
@@ -98,13 +99,13 @@ class AgentWorkflow:
 
         potential_agents_json = json.dumps(potential_agents, indent=2)
         
-        log("agent_rerank_prompt", {"prompt": raw_prompt_template, "query": query, "potential_agents": potential_agents_json})
+        await log("agent_rerank_prompt", {"prompt": raw_prompt_template, "query": query, "potential_agents": potential_agents_json})
 
         for attempt in range(self.max_retries):
             logger.info(f"Attempt {attempt + 1}/{self.max_retries} to rerank agents with LLM.")
             try:
-                response = chain.invoke({"query": query, "potential_agents": potential_agents_json})
-                log("agent_rerank_llm_response", {"attempt": attempt + 1, "response": response.content.strip()})
+                response = await chain.ainvoke({"query": query, "potential_agents": potential_agents_json})
+                await log("agent_rerank_llm_response", {"attempt": attempt + 1, "response": response.content.strip()})
                 ranked_agent_ids = json.loads(response.content.strip())
                 if isinstance(ranked_agent_ids, list) and all(isinstance(aid, str) for aid in ranked_agent_ids):
                     logger.info(f"LLM reranked agents: {ranked_agent_ids}")
@@ -122,48 +123,46 @@ class AgentWorkflow:
         logger.error(f"Failed to get valid LLM reranking output after {self.max_retries} attempts.")
         return []
 
-    def run_workflow(self, query: str, session_id: Optional[str] = None, session_manager: Optional[Any] = None) -> List[str]:
+    async def run_workflow(self, query: str, session_id: Optional[str] = None, session_manager: Optional[Any] = None) -> List[str]:
         """
         Runs the complete workflow: embed query, find agents, rerank with LLM, and return ranked agent IDs.
         """
-        def log(event: str, data: Dict[str, Any]):
+        async def log(event: str, data: Dict[str, Any]):
             if session_id and session_manager:
                 log_entry = {"event": event, **data}
-                session_manager.save_log(session_id, log_entry)
+                await session_manager.save_log(session_id, log_entry)
 
         logger.info(f"Starting workflow for query: '{query}'")
-        log("agent_workflow_started", {"query": query})
+        await log("agent_workflow_started", {"query": query})
 
         query_embedding = self.create_query_embedding(query)
         relevant_agents = self.find_relevant_agents(query_embedding, limit=5)
 
         if not relevant_agents:
             logger.warning("No initial relevant agents found.")
-            log("agent_vector_search_failed", {"reason": "No agents found."})
+            await log("agent_vector_search_failed", {"reason": "No agents found."})
             return []
-        log("agent_vector_search_completed", {"retrieved_agents_count": len(relevant_agents), "retrieved_agents": relevant_agents})
+        await log("agent_vector_search_completed", {"retrieved_agents_count": len(relevant_agents), "retrieved_agents": relevant_agents})
 
         # Rerank agents using the LLM
-        ranked_agent_ids = self.rerank_agents_with_llm(query, relevant_agents, session_id, session_manager)
+        ranked_agent_ids = await self.rerank_agents_with_llm(query, relevant_agents, session_id, session_manager)
 
         if not ranked_agent_ids:
             logger.warning("LLM reranking returned no agents or failed.")
-            log("agent_rerank_failed", {"reason": "LLM reranking failed or returned no agents."})
+            await log("agent_rerank_failed", {"reason": "LLM reranking failed or returned no agents."})
             return []
         
         logger.info(f"Workflow completed successfully. Ranked Agent IDs: {ranked_agent_ids}")
-        log("agent_workflow_completed", {"ranked_agent_ids": ranked_agent_ids})
+        await log("agent_workflow_completed", {"ranked_agent_ids": ranked_agent_ids})
         return ranked_agent_ids
 
-if __name__ == "__main__":
+async def main():
     logging.basicConfig(level=logging.INFO)
     workflow = AgentWorkflow()
     
-
     user_query = "Platform Intelligence"
     
-    
-    ranked_agent_ids = workflow.run_workflow(user_query)
+    ranked_agent_ids = await workflow.run_workflow(user_query)
     print("\n--- Ranked Agent IDs ---")
     if ranked_agent_ids:
         for agent_id in ranked_agent_ids:
@@ -171,3 +170,6 @@ if __name__ == "__main__":
     else:
         print("No agents were ranked or found.")
     print("------------------------")
+
+if __name__ == "__main__":
+    asyncio.run(main())

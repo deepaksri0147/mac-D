@@ -7,9 +7,12 @@ Handles token generation and injection for dependent APIs
 import logging
 import requests
 import json
+import os
 from typing import Dict, Any, Optional
 from copy import deepcopy
+from dotenv import load_dotenv
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 
@@ -29,13 +32,17 @@ class APIExecutor:
 
         logger.info("🚀 No cached token found, fetching new authentication token...")
         
-        token_url = "https://igs.gov-cloud.ai/mobius-iam-service/v1.0/login"
+        token_url = os.getenv("TOKEN_URL")
         token_payload = {
-            "userName": "aidtaas@gaiansolutions.com",
-            "password": "Gaian@123",
-            "productId": "c2255be4-ddf6-449e-a1e0-b4f7f9a2b636",
-            "requestType": "TENANT"
+            "userName": os.getenv("TOKEN_USERNAME"),
+            "password": os.getenv("TOKEN_PASSWORD"),
+            "productId": os.getenv("TOKEN_PRODUCT_ID"),
+            "requestType": os.getenv("TOKEN_REQUEST_TYPE")
         }
+
+        if not all(token_payload.values()) or not token_url:
+            logger.error("Missing one or more token generation environment variables.")
+            return None
         
         try:
             response = requests.post(token_url, json=token_payload, timeout=30)
