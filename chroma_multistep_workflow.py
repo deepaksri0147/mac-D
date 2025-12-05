@@ -313,6 +313,7 @@ class MultiStepToolWorkflow:
 
 
         logger.info("Tool workflow completed.")
+        execution_result["session_id"] = session_id
         return execution_result
 
 if __name__ == "__main__":
