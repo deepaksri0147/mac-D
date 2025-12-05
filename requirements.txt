@@ -1,0 +1,8 @@
+python-dotenv
+langchain
+langchain-ollama
+aiofiles
+fastapi
+uvicorn
+pydantic
+requests

@@ -5,8 +5,11 @@ import logging
 from typing import List, Dict, Any, Optional
 import aiofiles
 import requests
+from dotenv import load_dotenv
 from datetime import datetime, timezone
 from api_executor import APIExecutor
+
+load_dotenv()
  
 logger = logging.getLogger(__name__)
  
@@ -20,7 +23,7 @@ class SessionManager:
         if not os.path.exists(self.session_dir):
             os.makedirs(self.session_dir)
             logger.info(f"Created session directory at: {self.session_dir}")
-        self.log_api_endpoint = os.getenv("LOG_API_ENDPOINT", 'https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/69301e35fd9c66658f22d77f/instances')
+        self.log_api_endpoint = os.getenv("LOG_API_ENDPOINT", f'https://igs.gov-cloud.ai/pi-entity-instances-service/v2.0/schemas/{os.getenv("SCHEMA_ID")}/instances')
         self.api_executor = APIExecutor()
 
     def create_session_id(self) -> str:

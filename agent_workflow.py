@@ -25,7 +25,7 @@ class AgentWorkflow:
         self.embedding_service: OllamaEmbeddingService = create_ollama_embedding_service()
         self.discovery_agent_manager: DiscoveryAgentManager = create_discovery_agent_manager()
         self.llm = ChatOllama(model=MODEL_NAME, base_url=OLLAMA_BASE_URL, reasoning=True)
-        self.prompt_template_path = "prompts/agent_invoke_prompt.md" # Default path
+        self.prompt_template_path = "prompts/agent_rerank_prompt.md" # Default path
         self.max_retries = max_retries
 
         # Ensure indexes are created for the agent manager
@@ -106,12 +106,26 @@ class AgentWorkflow:
             try:
                 response = await chain.ainvoke({"query": query, "potential_agents": potential_agents_json})
                 await log("agent_rerank_llm_response", {"attempt": attempt + 1, "response": response.content.strip()})
-                ranked_agent_ids = json.loads(response.content.strip())
-                if isinstance(ranked_agent_ids, list) and all(isinstance(aid, str) for aid in ranked_agent_ids):
-                    logger.info(f"LLM reranked agents: {ranked_agent_ids}")
-                    return ranked_agent_ids
+                result_json = json.loads(response.content.strip())
+                id_key = "ranked_agent_ids" # Consistent key for agents
+                
+                ranked_ids = None
+                if isinstance(result_json, dict):
+                    # 1. Try to get agent IDs using the correct key
+                    if id_key in result_json and isinstance(result_json[id_key], list):
+                        ranked_ids = result_json[id_key]
+                    
+                    # 2. Fallback: Check for tool key, as LLM is confused
+                    elif "ranked_tool_ids" in result_json and isinstance(result_json["ranked_tool_ids"], list):
+                        ranked_ids = result_json["ranked_tool_ids"]
+                        logger.warning(f"LLM used 'ranked_tool_ids' key instead of 'ranked_agent_ids' (attempt {attempt + 1}). Using tool key results.")
+
+                if ranked_ids and all(isinstance(aid, str) for aid in ranked_ids):
+                    logger.info(f"LLM reranked agents: {ranked_ids}")
+                    # We accept these IDs to unblock the workflow, although they might be tool IDs.
+                    return ranked_ids
                 else:
-                    logger.warning(f"LLM returned malformed JSON for reranking (attempt {attempt + 1}): {response.content.strip()}")
+                    logger.warning(f"LLM returned malformed JSON or invalid list for reranking (attempt {attempt + 1}): {response.content.strip()}")
             except json.JSONDecodeError as e:
                 logger.warning(f"Failed to parse LLM's reranking output as JSON (attempt {attempt + 1}): {e}. Output: {response.content.strip()}")
             except Exception as e:

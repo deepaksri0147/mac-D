@@ -236,41 +236,33 @@ class ChromaDBInserter:
             List of tool IDs (strings)
         """
         try:
-            if not agent_id_list:
-                logger.warning("No agent IDs provided, returning empty list")
-                return []
+            # Base filter for tools
+            where_clause = {"item_type": "tool"}
             
-            # Query ChromaDB collection with filter for tools
-            # ChromaDB where clause syntax: use $and for multiple conditions
-            # For multiple agent_ids, we'll query each agent separately and combine results
-            all_tool_ids = []
-            seen_ids = set()
+            # If agent_id_list is provided, add it to the filter
+            if agent_id_list:
+                # Use $in operator for a list of agent IDs
+                where_clause = {
+                    "$and": [
+                        {"item_type": "tool"},
+                        {"agent_id": {"$in": agent_id_list}}
+                    ]
+                }
             
-            for agent_id in agent_id_list:
-                try:
-                    results = self.collection.query(
-                        query_texts=[query],
-                        n_results=limit,
-                        where={
-                            "$and": [
-                                {"item_type": "tool"},  # Must be a tool
-                                {"agent_id": agent_id}  # Must belong to this agent
-                            ]
-                        }
-                    )
-                    
-                    # Extract tool IDs from results
-                    if results and "ids" in results and len(results["ids"]) > 0:
-                        for tool_id in results["ids"][0]:
-                            if tool_id not in seen_ids:
-                                all_tool_ids.append(tool_id)
-                                seen_ids.add(tool_id)
-                except Exception as e:
-                    logger.warning(f"Failed to query tools for agent {agent_id}: {e}")
-                    continue
+            # Query ChromaDB collection
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=limit,
+                where=where_clause
+            )
             
-            logger.info(f"Found {len(all_tool_ids)} unique tools for query: '{query}' with agents: {agent_id_list}")
-            return all_tool_ids[:limit]  # Return up to limit
+            # Extract tool IDs from results
+            tool_ids = []
+            if results and "ids" in results and len(results["ids"]) > 0:
+                tool_ids = results["ids"][0]
+            
+            logger.info(f"Found {len(tool_ids)} tools for query: '{query}' with agents: {agent_id_list if agent_id_list else 'all'}")
+            return tool_ids
         except Exception as e:
             logger.error(f"Failed to search tools in ChromaDB: {e}", exc_info=True)
             return []
