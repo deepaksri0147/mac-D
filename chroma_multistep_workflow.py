@@ -70,16 +70,17 @@ def tool_prompt(request: ModelRequest) -> str:
     if tools:
         tool_info_list = []
         for tool in tools:
+            schema = tool.get("schema", {})
             tool_details = {
                 "tool_id": tool.get("tool_id"),
                 "name": tool.get("name"),
                 "description": tool.get("description"),
-                "requestBody": tool.get("requestBody"),
-                "queryParameters": tool.get("queryParameters"),
-                "field_descriptions": tool.get("field_descriptions"),
-                "required_fields": tool.get("required_fields"),
-                "authentication_required": tool.get("authentication_required", False),
-                "returns_token": tool.get("returns_token", False),
+                "requestBody": schema.get("requestBody"),
+                "queryParameters": schema.get("queryParameters"),
+                "field_descriptions": schema.get("field_descriptions"),
+                "required_fields": schema.get("required_fields"),
+                "authentication_required": schema.get("authentication_required", False),
+                "returns_token": schema.get("returns_token", False),
             }
             tool_info_list.append(json.dumps(tool_details, indent=2))
         
